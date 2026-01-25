@@ -1,3 +1,7 @@
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include "systemcalls.h"
 
 /**
@@ -17,7 +21,12 @@ bool do_system(const char *cmd)
  *   or false() if it returned a failure
 */
 
-    return true;
+    int ret = system(cmd);
+    if (ret == -1) {
+        return false;
+    }
+    // system() returns the termination status of the command
+    return (WIFEXITED(ret) && WEXITSTATUS(ret) == 0);
 }
 
 /**
@@ -47,7 +56,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    //command[count] = command[count];
 
 /*
  * TODO:
@@ -58,10 +67,32 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    fflush(stdout);
+    pid_t pid = fork();
 
-    va_end(args);
+    if (pid == -1) {
+        perror("fork");
+        va_end(args);
+        return false;
+    }
 
-    return true;
+    if (pid == 0) {
+        // Child Process
+        execv(command[0], command);
+        // If execv returns, it failed
+        perror("execv");
+        exit(EXIT_FAILURE); 
+    } else {
+        // Parent Process
+        int status;
+        if (waitpid(pid, &status, 0) == -1) {
+            va_end(args);
+            return false;
+        }
+        va_end(args);
+        // Return true only if child exited normally with code 0
+        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
 }
 
 /**
@@ -82,7 +113,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    // command[count] = command[count];
 
 
 /*
@@ -92,8 +123,39 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0) { 
+        perror("open"); 
+        va_end(args);
+        return false; 
+    }
 
-    va_end(args);
+    fflush(stdout);
+    pid_t pid = fork();
 
-    return true;
+    if (pid == -1) {
+        close(fd);
+        va_end(args);
+        return false;
+    }
+
+    if (pid == 0) {
+        // Child: Redirect stdout to the file descriptor
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            perror("dup2");
+            exit(EXIT_FAILURE);
+        }
+        close(fd); // Don't need the original FD anymore
+        execv(command[0], command);
+        exit(EXIT_FAILURE);
+    } 
+    else {
+        // Parent
+        close(fd); // Parent doesn't need this file open
+        int status;
+        waitpid(pid, &status, 0);
+        va_end(args);
+        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+
 }
