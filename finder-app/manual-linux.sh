@@ -13,6 +13,12 @@ FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
 CROSS_COMPILE=aarch64-linux-gnu-
 
+if ! command -v ${CROSS_COMPILE}gcc &> /dev/null
+then
+    echo "${CROSS_COMPILE}gcc could not be found, attempting to install..."
+    sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+fi
+
 if [ $# -lt 1 ]
 then
 	echo "Using default directory ${OUTDIR} for output"
@@ -83,12 +89,17 @@ ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
-SYSROOT="/usr/aarch64-linux-gnu"
-echo "Using SYSROOT: $SYSROOT"
+SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
 
-# Copy the program interpreter to /lib
+# If SYSROOT is just '/' or empty, hardcode the known Ubuntu path
+if [ "$SYSROOT" = "/" ] || [ -z "$SYSROOT" ]; then
+    SYSROOT="/usr/aarch64-linux-gnu"
+fi
+
+# Copy the program interpreter
 cp -a "${SYSROOT}/lib/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
-# Copy shared libraries to /lib64
+
+# Copy shared libraries from /lib (host) to /lib64 (target)
 cp -a "${SYSROOT}/lib/libm.so.6" "${OUTDIR}/rootfs/lib64/"
 cp -a "${SYSROOT}/lib/libresolv.so.2" "${OUTDIR}/rootfs/lib64/"
 cp -a "${SYSROOT}/lib/libc.so.6" "${OUTDIR}/rootfs/lib64/"
