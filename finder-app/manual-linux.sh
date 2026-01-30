@@ -86,54 +86,61 @@ echo "Library dependencies"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
-# --- FIXED LIBRARY SECTION ---
+# TODO: Add library dependencies to rootfs
 SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
-
 if [ "$SYSROOT" = "/" ] || [ -z "$SYSROOT" ]; then
-    # Fallback path for the GitHub runner / Ubuntu 22.04
     SYSROOT="/usr/aarch64-linux-gnu"
 fi
+
 echo "Using SYSROOT: ${SYSROOT}"
 
-# Copy loader (interpreter) to /lib
+# Ensure destination directories exist
+mkdir -p "${OUTDIR}/rootfs/lib"
+mkdir -p "${OUTDIR}/rootfs/lib64"
+
+# 1. Find and copy the loader and libraries to /lib
 find "${SYSROOT}" -name "ld-linux-aarch64.so.1" -exec cp -L {} "${OUTDIR}/rootfs/lib/" \;
+find "${SYSROOT}" -name "libm.so.6" -exec cp -L {} "${OUTDIR}/rootfs/lib/" \;
+find "${SYSROOT}" -name "libresolv.so.2" -exec cp -L {} "${OUTDIR}/rootfs/lib/" \;
+find "${SYSROOT}" -name "libc.so.6" -exec cp -L {} "${OUTDIR}/rootfs/lib/" \;
 
-# Copy shared libraries to /lib64
-for lib in libm.so.6 libresolv.so.2 libc.so.6; do
-    find "${SYSROOT}" -name "$lib" -exec cp -L {} "${OUTDIR}/rootfs/lib64/" \;
-done
+# 2. Duplicate them into /lib64 to satisfy all possible search paths
+cp -L "${OUTDIR}/rootfs/lib/"* "${OUTDIR}/rootfs/lib64/"
 
-if [ ! -e "${OUTDIR}/rootfs/lib/ld-linux-aarch64.so.1" ]; then
-    echo "ERROR: Failed to copy ld-linux-aarch64.so.1"
-    exit 1
-fi
-
-# --- CRITICAL: THE INIT LINK ---
-# Without this /init file, the kernel will panic!
+# 3. Create the symlink for init at the root (prevents Kernel Panic)
 ln -sf bin/busybox "${OUTDIR}/rootfs/init"
 
-# Make device nodes (requires sudo)
+# TODO: Make device nodes
+sudo rm -f "${OUTDIR}/rootfs/dev/null"
+sudo rm -f "${OUTDIR}/rootfs/dev/console"
 sudo mknod -m 666 "${OUTDIR}/rootfs/dev/null" c 1 3
 sudo mknod -m 600 "${OUTDIR}/rootfs/dev/console" c 5 1
 
-# Build the writer utility
+# TODO: Clean and build the writer utility
 cd "${FINDER_APP_DIR}"
 make clean
 make CROSS_COMPILE=${CROSS_COMPILE}
 
-# Copy scripts and executables to /home
-cp writer finder.sh finder-test.sh autorun-qemu.sh "${OUTDIR}/rootfs/home/"
-mkdir -p "${OUTDIR}/rootfs/home/conf"
-cp conf/assignment.txt conf/username.txt "${OUTDIR}/rootfs/home/conf/"
+# TODO: Copy the finder related scripts and executables to the /home directory
+cp "${FINDER_APP_DIR}/writer" "${OUTDIR}/rootfs/home/"
+cp "${FINDER_APP_DIR}/finder.sh" "${OUTDIR}/rootfs/home/"
+cp "${FINDER_APP_DIR}/finder-test.sh" "${OUTDIR}/rootfs/home/"
+cp "${FINDER_APP_DIR}/autorun-qemu.sh" "${OUTDIR}/rootfs/home/"
 
-# Correct the path in finder-test.sh for the target filesystem
+mkdir -p "${OUTDIR}/rootfs/home/conf"
+cp "${FINDER_APP_DIR}/conf/assignment.txt" "${OUTDIR}/rootfs/home/conf/"
+cp "${FINDER_APP_DIR}/conf/username.txt" "${OUTDIR}/rootfs/home/conf/"
+
+# Fix the path in finder-test.sh
 sed -i 's|\.\./conf/assignment.txt|conf/assignment.txt|g' "${OUTDIR}/rootfs/home/finder-test.sh"
 
-# Set root ownership
+# TODO: Chown the root directory
 cd "${OUTDIR}/rootfs"
 sudo chown -R root:root *
 
-# Create initramfs.cpio.gz
-find . | cpio -H newc -ov --owner root:root > "${OUTDIR}/initramfs.cpio"
+# TODO: Create initramfs.cpio.gz
+cd "${OUTDIR}/rootfs"
+sudo find . | cpio -H newc -ov --owner root:root > "${OUTDIR}/initramfs.cpio"
+
 cd "${OUTDIR}"
 gzip -f initramfs.cpio
