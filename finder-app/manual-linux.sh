@@ -96,16 +96,17 @@ fi
 echo "Using SYSROOT: ${SYSROOT}"
 
 # Copy loader (interpreter) to /lib
-if [ -f "${SYSROOT}/lib/ld-linux-aarch64.so.1" ]; then
-    cp -L "${SYSROOT}/lib/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
-else
-    cp -L "${SYSROOT}/lib64/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
-fi
+find "${SYSROOT}" -name "ld-linux-aarch64.so.1" -exec cp -L {} "${OUTDIR}/rootfs/lib/" \;
 
 # Copy shared libraries to /lib64
-cp -L "${SYSROOT}/lib64/libm.so.6" "${OUTDIR}/rootfs/lib64/"
-cp -L "${SYSROOT}/lib64/libresolv.so.2" "${OUTDIR}/rootfs/lib64/"
-cp -L "${SYSROOT}/lib64/libc.so.6" "${OUTDIR}/rootfs/lib64/"
+for lib in libm.so.6 libresolv.so.2 libc.so.6; do
+    find "${SYSROOT}" -name "$lib" -exec cp -L {} "${OUTDIR}/rootfs/lib64/" \;
+done
+
+if [ ! -e "${OUTDIR}/rootfs/lib/ld-linux-aarch64.so.1" ]; then
+    echo "ERROR: Failed to copy ld-linux-aarch64.so.1"
+    exit 1
+fi
 
 # --- CRITICAL: THE INIT LINK ---
 # Without this /init file, the kernel will panic!
