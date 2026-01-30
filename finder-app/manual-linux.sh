@@ -89,8 +89,18 @@ ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 # --- FIXED LIBRARY SECTION ---
 SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
 
+if [ "$SYSROOT" = "/" ] || [ -z "$SYSROOT" ]; then
+    # Fallback path for the GitHub runner / Ubuntu 22.04
+    SYSROOT="/usr/aarch64-linux-gnu"
+fi
+echo "Using SYSROOT: ${SYSROOT}"
+
 # Copy loader (interpreter) to /lib
-cp -L "${SYSROOT}/lib/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
+if [ -f "${SYSROOT}/lib/ld-linux-aarch64.so.1" ]; then
+    cp -L "${SYSROOT}/lib/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
+else
+    cp -L "${SYSROOT}/lib64/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
+fi
 
 # Copy shared libraries to /lib64
 cp -L "${SYSROOT}/lib64/libm.so.6" "${OUTDIR}/rootfs/lib64/"
