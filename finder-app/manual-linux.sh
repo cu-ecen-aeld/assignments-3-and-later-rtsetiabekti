@@ -94,15 +94,15 @@ if [ "$SYSROOT" = "/" ] || [ -z "$SYSROOT" ]; then
     SYSROOT="/usr/aarch64-linux-gnu"
 fi
 
-# Copy the program interpreter
-cd "${OUTDIR}/rootfs/lib"
-cp -a "${SYSROOT}/lib/ld-linux-aarch64.so.1"
+# Copy the program interpreter (ld-linux)
+mkdir -p "${OUTDIR}/rootfs/lib"
+cp -a "${SYSROOT}/lib/ld-linux-aarch64.so.1" "${OUTDIR}/rootfs/lib/"
 
-# Copy shared libraries from /lib (host) to /lib64 (target)
-cd "${OUTDIR}/rootfs/lib64"
-cp -a "${SYSROOT}/lib/libm.so.6"
-cp -a "${SYSROOT}/lib/libresolv.so.2"
-cp -a "${SYSROOT}/lib/libc.so.6"
+# Copy shared libraries to lib64
+mkdir -p "${OUTDIR}/rootfs/lib64"
+cp -a "${SYSROOT}/lib/libm.so.6" "${OUTDIR}/rootfs/lib64/"
+cp -a "${SYSROOT}/lib/libresolv.so.2" "${OUTDIR}/rootfs/lib64/"
+cp -a "${SYSROOT}/lib/libc.so.6" "${OUTDIR}/rootfs/lib64/"
 
 cd "${OUTDIR}/rootfs"
 
