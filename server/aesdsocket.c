@@ -21,14 +21,15 @@ volatile sig_atomic_t caught_sig = 0;
 
 void handle_signal(int sig) {
     caught_sig = 1;
-    // shutdown triggers an error in accept() to break the blocking call
-    if (server_fd != -1) {
-        shutdown(server_fd, SHUT_RDWR);
-    }
+    // We don't call syslog or shutdown here to keep the handler 100% async-signal-safe
+    // for Valgrind's benefit.
 }
 
 void cleanup() {
-    if (server_fd != -1) close(server_fd);
+    if (server_fd != -1) {
+        close(server_fd);
+        server_fd = -1;
+    }
     unlink(DATA_FILE);
     syslog(LOG_INFO, "Caught signal, exiting");
     closelog();
@@ -37,12 +38,13 @@ void cleanup() {
 int main(int argc, char *argv[]) {
     openlog("aesdsocket", LOG_PID, LOG_USER);
 
-    // Setup signal handling
+    // Setup signal handling IMMEDIATELY
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_signal;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0) {
+        return -1;
+    }
 
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -70,6 +72,7 @@ int main(int argc, char *argv[]) {
     }
     freeaddrinfo(res);
 
+    // DAEMON MODE
     if (argc > 1 && strcmp(argv[1], "-d") == 0) {
         pid_t pid = fork();
         if (pid < 0) return -1;
@@ -91,9 +94,12 @@ int main(int argc, char *argv[]) {
     while (!caught_sig) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
+        
+        // Use accept() - it will return -1 with EINTR when signal hits
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
         
         if (client_fd == -1) {
+            // Check if we were interrupted by a signal
             if (caught_sig) break;
             continue;
         }
@@ -102,7 +108,6 @@ int main(int argc, char *argv[]) {
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
         syslog(LOG_INFO, "Accepted connection from %s", ip_str);
 
-        // Persistent file for all connections
         int data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
         if (data_fd == -1) {
             close(client_fd);
@@ -113,25 +118,28 @@ int main(int argc, char *argv[]) {
         ssize_t total_recv = 0;
         ssize_t current_buf_size = BUF_SIZE;
 
-        // Receive logic
         while (1) {
             ssize_t bytes_received = recv(client_fd, rx_buf + total_recv, BUF_SIZE, 0);
             if (bytes_received <= 0) break;
             
             total_recv += bytes_received;
 
-            // Check if we received a newline
             if (memchr(rx_buf + total_recv - bytes_received, '\n', bytes_received)) {
                 write(data_fd, rx_buf, total_recv);
-                fsync(data_fd); // Critical for GitHub Runner/Valgrind timing
                 break;
             }
 
             current_buf_size += BUF_SIZE;
-            rx_buf = realloc(rx_buf, current_buf_size);
+            char *new_ptr = realloc(rx_buf, current_buf_size);
+            if (!new_ptr) {
+                free(rx_buf);
+                goto request_done; 
+            }
+            rx_buf = new_ptr;
         }
 
-        // Send logic: return full file content
+        // Send back full file
+        fsync(data_fd); 
         lseek(data_fd, 0, SEEK_SET);
         char read_buf[BUF_SIZE];
         ssize_t bytes_read;
@@ -139,6 +147,7 @@ int main(int argc, char *argv[]) {
             send(client_fd, read_buf, bytes_read, 0);
         }
 
+    request_done:
         free(rx_buf);
         close(data_fd);
         close(client_fd);
