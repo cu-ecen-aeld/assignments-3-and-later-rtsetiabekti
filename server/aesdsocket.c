@@ -17,20 +17,20 @@
 #define BUF_SIZE 1024
 
 int server_fd = -1;
-int data_fd = -1;
 volatile sig_atomic_t caught_sig = 0;
 
 void handle_signal(int sig) {
     caught_sig = 1;
-    syslog(LOG_INFO, "Caught signal, exiting");
-    // Wake up accept() or recv() if possible
-    if (server_fd != -1) shutdown(server_fd, SHUT_RDWR);
+    // shutdown triggers an error in accept() to break the blocking call
+    if (server_fd != -1) {
+        shutdown(server_fd, SHUT_RDWR);
+    }
 }
 
 void cleanup() {
     if (server_fd != -1) close(server_fd);
-    if (data_fd != -1) close(data_fd);
     unlink(DATA_FILE);
+    syslog(LOG_INFO, "Caught signal, exiting");
     closelog();
 }
 
@@ -44,7 +44,6 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    // Get address info
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -71,13 +70,12 @@ int main(int argc, char *argv[]) {
     }
     freeaddrinfo(res);
 
-    // Check for daemon mode
     if (argc > 1 && strcmp(argv[1], "-d") == 0) {
         pid_t pid = fork();
         if (pid < 0) return -1;
-        if (pid > 0) exit(0); // Parent exits
+        if (pid > 0) exit(0);
         setsid();
-        chdir("/");
+        if (chdir("/") == -1) return -1;
         int dev_null = open("/dev/null", O_RDWR);
         dup2(dev_null, STDIN_FILENO);
         dup2(dev_null, STDOUT_FILENO);
@@ -104,19 +102,28 @@ int main(int argc, char *argv[]) {
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
         syslog(LOG_INFO, "Accepted connection from %s", ip_str);
 
-        // Receive logic
-        data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+        // Persistent file for all connections
+        int data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+        if (data_fd == -1) {
+            close(client_fd);
+            continue;
+        }
+
         char *rx_buf = malloc(BUF_SIZE);
         ssize_t total_recv = 0;
         ssize_t current_buf_size = BUF_SIZE;
 
+        // Receive logic
         while (1) {
             ssize_t bytes_received = recv(client_fd, rx_buf + total_recv, BUF_SIZE, 0);
             if (bytes_received <= 0) break;
             
             total_recv += bytes_received;
-            if (rx_buf[total_recv - 1] == '\n') {
+
+            // Check if we received a newline
+            if (memchr(rx_buf + total_recv - bytes_received, '\n', bytes_received)) {
                 write(data_fd, rx_buf, total_recv);
+                fsync(data_fd); // Critical for GitHub Runner/Valgrind timing
                 break;
             }
 
@@ -124,7 +131,7 @@ int main(int argc, char *argv[]) {
             rx_buf = realloc(rx_buf, current_buf_size);
         }
 
-        // Send logic: send the full file back
+        // Send logic: return full file content
         lseek(data_fd, 0, SEEK_SET);
         char read_buf[BUF_SIZE];
         ssize_t bytes_read;
