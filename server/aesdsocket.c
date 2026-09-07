@@ -12,12 +12,29 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#include <pthread.h>
+#include <sys/queue.h>
+#include <stdbool.h>
+
+#include <time.h>
+
 #define PORT "9000"
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 #define BUF_SIZE 1024
 
+timer_t timerid;
 int server_fd = -1;
 volatile sig_atomic_t caught_sig = 0;
+
+struct thread_node {
+    pthread_t   thread_id;
+    int         client_fd;
+    char        ip_str[INET_ADDRSTRLEN];
+    bool        complete;
+    SLIST_ENTRY(thread_node) entries;
+};
+SLIST_HEAD(thread_list, thread_node) head = SLIST_HEAD_INITIALIZER(head);
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void handle_signal(int sig) {
     caught_sig = 1;
@@ -30,9 +47,93 @@ void cleanup() {
         close(server_fd);
         server_fd = -1;
     }
+
+    struct thread_node *cur = SLIST_FIRST(&head);
+    while (cur != NULL) {
+        struct thread_node *next = SLIST_NEXT(cur, entries);
+        pthread_join(cur->thread_id, NULL);
+        free(cur);
+        cur = next;
+    }
+    SLIST_INIT(&head);
+
+    timer_delete(timerid);
+    pthread_mutex_destroy(&file_mutex);
+
     unlink(DATA_FILE);
     syslog(LOG_INFO, "Caught signal, exiting");
     closelog();
+}
+
+void *thread_func(void *arg) {
+    struct thread_node *node = (struct thread_node *)arg;
+
+    int data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (data_fd == -1) {
+        close(node->client_fd);
+        node->complete = true;
+        return NULL;
+    }
+
+    char *rx_buf = malloc(BUF_SIZE);
+    ssize_t total_recv = 0;
+    ssize_t current_buf_size = BUF_SIZE;
+
+    while (1) {
+        ssize_t bytes_received = recv(node->client_fd, rx_buf + total_recv, current_buf_size - total_recv, 0);
+        if (bytes_received <= 0) break;
+        total_recv += bytes_received;
+
+        if (memchr(rx_buf + total_recv - bytes_received, '\n', bytes_received)) {
+            pthread_mutex_lock(&file_mutex);          // 1a
+            write(data_fd, rx_buf, total_recv);
+
+            fsync(data_fd);
+            lseek(data_fd, 0, SEEK_SET);
+            char read_buf[BUF_SIZE];
+            ssize_t bytes_read;
+            while ((bytes_read = read(data_fd, read_buf, BUF_SIZE)) > 0) {
+                send(node->client_fd, read_buf, bytes_read, 0);
+            }
+            pthread_mutex_unlock(&file_mutex);        // 1a
+            break;
+        }
+
+        current_buf_size += BUF_SIZE;
+        char *new_ptr = realloc(rx_buf, current_buf_size);
+        if (!new_ptr) { free(rx_buf); rx_buf = NULL; break; }
+        rx_buf = new_ptr;
+    }
+
+    free(rx_buf);
+    close(data_fd);
+    close(node->client_fd);
+    syslog(LOG_INFO, "Closed connection from %s", node->ip_str);
+
+    node->complete = true;   // 1b: signal main this thread is done
+    return NULL;
+}
+
+void timer_handler(union sigval sv) {
+    (void)sv;
+
+    char timestamp[128];
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+
+    // 2a: "timestamp:" + RFC 2822 time + newline
+    int len = strftime(timestamp, sizeof(timestamp),
+                       "timestamp:%a, %d %b %Y %H:%M:%S %z\n", tm_info);
+    if (len == 0) return;
+
+    // 2b: same mutex as the socket writes → atomic w.r.t. socket data
+    pthread_mutex_lock(&file_mutex);
+    int fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd != -1) {
+        write(fd, timestamp, len);
+        close(fd);
+    }
+    pthread_mutex_unlock(&file_mutex);
 }
 
 int main(int argc, char *argv[]) {
@@ -91,67 +192,63 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_notify_function = timer_handler;
+    sev.sigev_value.sival_ptr = &timerid;
+
+    if (timer_create(CLOCK_MONOTONIC, &sev, &timerid) == 0) {
+        struct itimerspec its;
+        its.it_value.tv_sec = 10;      // first fire after 10s
+        its.it_value.tv_nsec = 0;
+        its.it_interval.tv_sec = 10;   // then every 10s
+        its.it_interval.tv_nsec = 0;
+        timer_settime(timerid, 0, &its, NULL);
+    }
+
     while (!caught_sig) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
-        
-        // Use accept() - it will return -1 with EINTR when signal hits
+
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
-        
         if (client_fd == -1) {
-            // Check if we were interrupted by a signal
             if (caught_sig) break;
             continue;
         }
 
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
-        syslog(LOG_INFO, "Accepted connection from %s", ip_str);
-
-        int data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
-        if (data_fd == -1) {
+        // Allocate this connection's node
+        struct thread_node *node = malloc(sizeof(struct thread_node));
+        if (!node) {
             close(client_fd);
             continue;
         }
+        node->client_fd = client_fd;
+        node->complete = false;
+        inet_ntop(AF_INET, &client_addr.sin_addr, node->ip_str, sizeof(node->ip_str));
+        syslog(LOG_INFO, "Accepted connection from %s", node->ip_str);
 
-        char *rx_buf = malloc(BUF_SIZE);
-        ssize_t total_recv = 0;
-        ssize_t current_buf_size = BUF_SIZE;
-
-        while (1) {
-            ssize_t bytes_received = recv(client_fd, rx_buf + total_recv, BUF_SIZE, 0);
-            if (bytes_received <= 0) break;
-            
-            total_recv += bytes_received;
-
-            if (memchr(rx_buf + total_recv - bytes_received, '\n', bytes_received)) {
-                write(data_fd, rx_buf, total_recv);
-                break;
-            }
-
-            current_buf_size += BUF_SIZE;
-            char *new_ptr = realloc(rx_buf, current_buf_size);
-            if (!new_ptr) {
-                free(rx_buf);
-                goto request_done; 
-            }
-            rx_buf = new_ptr;
+        // Spawn the worker thread
+        if (pthread_create(&node->thread_id, NULL, thread_func, node) != 0) {
+            syslog(LOG_ERR, "pthread_create failed");
+            close(client_fd);
+            free(node);
+            continue;
         }
 
-        // Send back full file
-        fsync(data_fd); 
-        lseek(data_fd, 0, SEEK_SET);
-        char read_buf[BUF_SIZE];
-        ssize_t bytes_read;
-        while ((bytes_read = read(data_fd, read_buf, BUF_SIZE)) > 0) {
-            send(client_fd, read_buf, bytes_read, 0);
-        }
+        // Track it in the list
+        SLIST_INSERT_HEAD(&head, node, entries);
 
-    request_done:
-        free(rx_buf);
-        close(data_fd);
-        close(client_fd);
-        syslog(LOG_INFO, "Closed connection from %s", ip_str);
+        struct thread_node *cur = SLIST_FIRST(&head);
+        while (cur != NULL) {
+            struct thread_node *next = SLIST_NEXT(cur, entries);
+            if (cur->complete) {
+                pthread_join(cur->thread_id, NULL);
+                SLIST_REMOVE(&head, cur, thread_node, entries);
+                free(cur);
+            }
+            cur = next;
+        }
     }
 
     cleanup();
