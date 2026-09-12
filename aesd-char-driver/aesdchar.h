@@ -23,11 +23,18 @@
 #  define PDEBUG(fmt, args...) /* not debugging: nothing */
 #endif
 
+#include <linux/mutex.h>
+#include <linux/cdev.h>
+#include "aesd-circular-buffer.h"
+
 struct aesd_dev
 {
     /**
      * TODO: Add structure(s) and locks needed to complete assignment requirements
      */
+    struct mutex lock;
+    struct aesd_circular_buffer buffer;
+    struct aesd_buffer_entry working_entry;
     struct cdev cdev;     /* Char device structure      */
 };
 
