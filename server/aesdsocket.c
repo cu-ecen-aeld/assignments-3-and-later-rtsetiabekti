@@ -19,7 +19,17 @@
 #include <time.h>
 
 #define PORT "9000"
-#define DATA_FILE "/var/tmp/aesdsocketdata"
+
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
+
+#if USE_AESD_CHAR_DEVICE
+#define DATA_PATH "/dev/aesdchar"
+#else
+#define DATA_PATH "/var/tmp/aesdsocketdata"
+#endif
+
 #define BUF_SIZE 1024
 
 timer_t timerid;
@@ -57,10 +67,14 @@ void cleanup() {
     }
     SLIST_INIT(&head);
 
+#if !USE_AESD_CHAR_DEVICE
     timer_delete(timerid);
+#endif
     pthread_mutex_destroy(&file_mutex);
 
-    unlink(DATA_FILE);
+#if !USE_AESD_CHAR_DEVICE
+    unlink(DATA_PATH);
+#endif
     syslog(LOG_INFO, "Caught signal, exiting");
     closelog();
 }
@@ -68,7 +82,7 @@ void cleanup() {
 void *thread_func(void *arg) {
     struct thread_node *node = (struct thread_node *)arg;
 
-    int data_fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    int data_fd = open(DATA_PATH, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (data_fd == -1) {
         close(node->client_fd);
         node->complete = true;
@@ -114,6 +128,7 @@ void *thread_func(void *arg) {
     return NULL;
 }
 
+#if !USE_AESD_CHAR_DEVICE
 void timer_handler(union sigval sv) {
     (void)sv;
 
@@ -128,13 +143,14 @@ void timer_handler(union sigval sv) {
 
     // 2b: same mutex as the socket writes → atomic w.r.t. socket data
     pthread_mutex_lock(&file_mutex);
-    int fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(DATA_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd != -1) {
         write(fd, timestamp, len);
         close(fd);
     }
     pthread_mutex_unlock(&file_mutex);
 }
+#endif
 
 int main(int argc, char *argv[]) {
     openlog("aesdsocket", LOG_PID, LOG_USER);
@@ -192,6 +208,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+#if !USE_AESD_CHAR_DEVICE
     struct sigevent sev;
     memset(&sev, 0, sizeof(sev));
     sev.sigev_notify = SIGEV_THREAD;
@@ -206,6 +223,7 @@ int main(int argc, char *argv[]) {
         its.it_interval.tv_nsec = 0;
         timer_settime(timerid, 0, &its, NULL);
     }
+#endif
 
     while (!caught_sig) {
         struct sockaddr_in client_addr;
