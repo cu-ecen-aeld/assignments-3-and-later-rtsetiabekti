@@ -18,6 +18,9 @@
 
 #include <time.h>
 
+#include <sys/ioctl.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
+
 #define PORT "9000"
 
 #ifndef USE_AESD_CHAR_DEVICE
@@ -82,16 +85,15 @@ void cleanup() {
 void *thread_func(void *arg) {
     struct thread_node *node = (struct thread_node *)arg;
 
-    int data_fd = open(DATA_PATH, O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (data_fd == -1) {
+    char *rx_buf = malloc(BUF_SIZE);
+    ssize_t total_recv = 0;
+    ssize_t current_buf_size = BUF_SIZE;
+
+    if (!rx_buf) {
         close(node->client_fd);
         node->complete = true;
         return NULL;
     }
-
-    char *rx_buf = malloc(BUF_SIZE);
-    ssize_t total_recv = 0;
-    ssize_t current_buf_size = BUF_SIZE;
 
     while (1) {
         ssize_t bytes_received = recv(node->client_fd, rx_buf + total_recv, current_buf_size - total_recv, 0);
@@ -99,17 +101,37 @@ void *thread_func(void *arg) {
         total_recv += bytes_received;
 
         if (memchr(rx_buf + total_recv - bytes_received, '\n', bytes_received)) {
-            pthread_mutex_lock(&file_mutex);          // 1a
-            write(data_fd, rx_buf, total_recv);
+            pthread_mutex_lock(&file_mutex);
 
-            fsync(data_fd);
-            lseek(data_fd, 0, SEEK_SET);
+            /* open the device only when accessing it (needed for driver unload test) */
+            int data_fd = open(DATA_PATH, O_RDWR);
+            if (data_fd == -1) {
+                pthread_mutex_unlock(&file_mutex);
+                break;
+            }
+
+            unsigned int seek_cmd, seek_offset;
+            if (sscanf(rx_buf, "AESDCHAR_IOCSEEKTO:%u,%u", &seek_cmd, &seek_offset) == 2) {
+                /* special command: send ioctl, do NOT write the string, do NOT rewind */
+                struct aesd_seekto seekto;
+                seekto.write_cmd = seek_cmd;
+                seekto.write_cmd_offset = seek_offset;
+                ioctl(data_fd, AESDCHAR_IOCSEEKTO, &seekto);
+                /* read continues from the position set by the ioctl */
+            } else {
+                /* normal command: append, then read whole content from the start */
+                write(data_fd, rx_buf, total_recv);
+                lseek(data_fd, 0, SEEK_SET);
+            }
+
             char read_buf[BUF_SIZE];
             ssize_t bytes_read;
             while ((bytes_read = read(data_fd, read_buf, BUF_SIZE)) > 0) {
                 send(node->client_fd, read_buf, bytes_read, 0);
             }
-            pthread_mutex_unlock(&file_mutex);        // 1a
+
+            close(data_fd);
+            pthread_mutex_unlock(&file_mutex);
             break;
         }
 
@@ -120,11 +142,10 @@ void *thread_func(void *arg) {
     }
 
     free(rx_buf);
-    close(data_fd);
     close(node->client_fd);
     syslog(LOG_INFO, "Closed connection from %s", node->ip_str);
 
-    node->complete = true;   // 1b: signal main this thread is done
+    node->complete = true;
     return NULL;
 }
 
